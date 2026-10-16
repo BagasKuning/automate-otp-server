@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "accounts:generate": "node generate-accounts.js"
+    "accounts:generate": "node generate-accounts.js",
+    "account:add": "node add-account.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
