@@ -25,6 +25,7 @@ const { writeAccountLauncher } = await import("./account-tools.js");
 // CONFIG
 const PORT = 3000;
 const MAX_WORKERS = 4;
+const ACCOUNT_ASSET_AUDIT_INTERVAL_MS = 15 * 60 * 1000;
 
 // STATE
 const queue = [];
@@ -67,6 +68,57 @@ function addAccountJobEvent(job, by, message) {
   job.events.push({ at: new Date().toISOString(), by, message });
   job.events = job.events.slice(-30);
   persistAccountCreationJobs();
+}
+
+function auditAccountFiles() {
+  try {
+    const accounts = getAccounts();
+    let restoredLaunchers = 0;
+
+    for (const account of accounts) {
+      const launcherPath = path.join(ACCOUNT_LAUNCHER_DIR, `${account}.bat`);
+      let launcherExists = false;
+      try {
+        launcherExists = fs.statSync(launcherPath).isFile();
+      } catch {}
+
+      if (!launcherExists) {
+        writeAccountLauncher(account);
+        restoredLaunchers += 1;
+      }
+    }
+
+    let failedRequests = 0;
+    for (const job of accountCreationJobs.values()) {
+      if (job.status !== "waiting_for_admin") continue;
+
+      const profilePath = path.join(ACCOUNT_DATA_DIR, job.email);
+      const launcherPath = path.join(ACCOUNT_LAUNCHER_DIR, `${job.email}.bat`);
+      let profileExists = false;
+      let launcherExists = false;
+      try {
+        profileExists = fs.statSync(profilePath).isDirectory();
+      } catch {}
+      try {
+        launcherExists = fs.statSync(launcherPath).isFile();
+      } catch {}
+
+      if (profileExists && launcherExists) continue;
+
+      job.status = "failed";
+      job.message =
+        "Folder profil atau file launcher hilang saat menunggu admin. Silakan buat request akun lagi.";
+      addAccountJobEvent(job, "server", job.message);
+      job.complete?.();
+      failedRequests += 1;
+    }
+
+    console.log(
+      `[ACCOUNT AUDIT] Selesai: ${accounts.length} profil diperiksa, ${restoredLaunchers} launcher dipulihkan, ${failedRequests} request aktif gagal karena file hilang.`,
+    );
+  } catch (error) {
+    console.error("[ACCOUNT AUDIT] Gagal memeriksa file akun:", error.message);
+  }
 }
 
 try {
@@ -547,9 +599,11 @@ function startAccountCreationWorker() {
           await new Promise((resolve) => {
             job.complete = resolve;
           });
-          job.status = "completed";
-          job.message = "Login selesai dikonfirmasi admin.";
-          addAccountJobEvent(job, "server", "Request selesai; antrean dilanjutkan.");
+          if (job.status !== "failed") {
+            job.status = "completed";
+            job.message = "Login selesai dikonfirmasi admin.";
+            addAccountJobEvent(job, "server", "Request selesai; antrean dilanjutkan.");
+          }
         } catch (error) {
           job.status = "failed";
           job.message = error?.message || "Gagal membuka profile Chrome.";
@@ -685,6 +739,11 @@ async function runJob(job, browser) {
 (async () => {
   processQueue();
   if (accountCreationQueue.length) startAccountCreationWorker();
+  const accountAuditTimer = setInterval(
+    auditAccountFiles,
+    ACCOUNT_ASSET_AUDIT_INTERVAL_MS,
+  );
+  accountAuditTimer.unref();
 
   app.listen(PORT, () => {
     console.log(`🚀 Server jalan di http://localhost:${PORT}`);

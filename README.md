@@ -20,6 +20,11 @@ Request status and the latest 30 system events per request are saved in
 The file also keeps a short event history for server-side troubleshooting. Use
 Discord for coordination between the requester and server admin.
 
+Every 15 minutes, the server checks profile folders and launcher files. If a
+profile folder exists but its `.bat` launcher is missing, the server recreates
+the launcher. An active request is marked failed and released from the queue if
+its profile folder or launcher disappears while waiting for the admin.
+
 ## Find an existing launcher
 
 Open the client's **Admin** tab, search for an existing email, then choose
