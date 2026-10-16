@@ -4,10 +4,13 @@ import cors from "cors";
 import { waitForRandomTimeout, waitForTimeout, withTimeout } from "./utils.js";
 import { findRowBySubject, searchOtpText } from "./puppeteer-function.js";
 import { PROVIDERS, getProviderSubjects } from "./data/providers.js";
+import path from "node:path";
 
 import dotenv from "dotenv";
-import { ACCOUNTS, validateAccount } from "./data/accounts.js";
 dotenv.config();
+const { ACCOUNT_DATA_DIR, getAccounts, validateAccount } = await import(
+  "./data/accounts.js"
+);
 
 // CONFIG
 const PORT = 3000;
@@ -68,7 +71,7 @@ app.post("/get-otp", (req, res) => {
 
 app.get("/accounts", (req, res) => {
   try {
-    res.json([...ACCOUNTS]);
+    res.json(getAccounts());
   } catch (error) {
     res.status(500).json({
       message: error?.message || "failed to fetch accounts",
@@ -131,8 +134,10 @@ async function processQueue() {
     try {
       browser = await puppeteer.launch({
         headless: false,
-        executablePath: String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`,
-        userDataDir: `C:/Google Chrome Portable/GoogleChromePortable/Data/${job.account}`,
+        executablePath:
+          process.env.CHROME_EXECUTABLE_PATH ||
+          String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+        userDataDir: path.join(ACCOUNT_DATA_DIR, job.account),
         args: ["--no-sandbox"],
       });
 

@@ -1,31 +1,13 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import "dotenv/config";
+import { ACCOUNT_DATA_DIR, getAccounts } from "./data/accounts.js";
 
-import fs from "fs";
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const outputPath = path.join(scriptDir, "data", "accounts.json");
+const accounts = getAccounts();
 
-const DATA_DIR = String.raw`C:\Google Chrome Portable\GoogleChromePortable\Data`;
-
-// Ambil semua folder di dalam Data
-const entries = fs
-  .readdirSync(DATA_DIR, { withFileTypes: true })
-  .filter((item) => item.isDirectory())
-  .map((item) => item.name)
-  .sort((a, b) => a.localeCompare(b));
-
-// Generate isi file accounts.js
-const output = `const ACCOUNTS = new Set([
-${entries.map((name) => `  "${name}",`).join("\n")}
-]);
-
-function validateAccount(account) {
-  return ACCOUNTS.has(account.toLowerCase().trim());
-}
-
-export { ACCOUNTS, validateAccount };
-`;
-
-// Pastikan folder ./data ada
-fs.mkdirSync("./data", { recursive: true });
-
-// Simpan ke ./data/accounts.js
-fs.writeFileSync("./data/accounts.js", output);
-
-console.log("✓ ./data/accounts.js generated successfully!");
+fs.writeFileSync(outputPath, `${JSON.stringify(accounts, null, 2)}\n`);
+console.log(`${accounts.length} accounts exported to ${outputPath}`);
+console.log(`Source profiles: ${ACCOUNT_DATA_DIR}`);
