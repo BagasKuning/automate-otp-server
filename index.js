@@ -6,7 +6,9 @@ import { findRowBySubject, searchOtpText } from "./puppeteer-function.js";
 import { PROVIDERS, getProviderSubjects } from "./data/providers.js";
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 import dotenv from "dotenv";
 dotenv.config();
@@ -19,7 +21,6 @@ const {
   validateAccount,
 } = await import("./data/accounts.js");
 const { writeAccountLauncher } = await import("./account-tools.js");
-const { openGoogleSignIn } = await import("./google-signin.js");
 
 // CONFIG
 const PORT = 3000;
@@ -33,6 +34,68 @@ const accountCreationQueue = [];
 const accountCreationJobs = new Map();
 const reservedAccountEmails = new Set();
 let accountCreationWorkerRunning = false;
+const accountCreationJobsFile = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "data",
+  "account-creation-jobs.json",
+);
+
+function persistAccountCreationJobs() {
+  fs.mkdirSync(path.dirname(accountCreationJobsFile), { recursive: true });
+  fs.writeFileSync(
+    accountCreationJobsFile,
+    JSON.stringify(
+      [...accountCreationJobs.values()].map(
+        ({ id, email, status, message, launcherPath, createdAt, events }) => ({
+          id,
+          email,
+          status,
+          message,
+          launcherPath,
+          createdAt,
+          events,
+        }),
+      ),
+      null,
+      2,
+    ),
+  );
+}
+
+function addAccountJobEvent(job, by, message) {
+  job.events ??= [];
+  job.events.push({ at: new Date().toISOString(), by, message });
+  job.events = job.events.slice(-30);
+  persistAccountCreationJobs();
+}
+
+try {
+  const savedJobs = JSON.parse(fs.readFileSync(accountCreationJobsFile, "utf8"));
+  if (Array.isArray(savedJobs)) {
+    for (const saved of savedJobs) {
+      if (!saved?.id || !isValidAccountEmail(saved.email)) continue;
+      const job = {
+        ...saved,
+        complete: undefined,
+        events: Array.isArray(saved.events) ? saved.events : [],
+      };
+      if (["queued", "opening"].includes(job.status)) {
+        job.status = "queued";
+        job.message = "Request dipulihkan setelah server dijalankan ulang.";
+        accountCreationQueue.push(job);
+        reservedAccountEmails.add(job.email);
+      } else if (job.status === "waiting_for_admin") {
+        accountCreationQueue.push(job);
+        reservedAccountEmails.add(job.email);
+      }
+      accountCreationJobs.set(job.id, job);
+    }
+  }
+} catch (error) {
+  if (error.code !== "ENOENT") {
+    console.error("[ACCOUNT JOBS] Gagal membaca file antrean:", error.message);
+  }
+}
 
 // API
 const API_KEY = process.env.SERVER_API_KEY;
@@ -84,10 +147,13 @@ app.post("/accounts/create", async (req, res) => {
       status: "queued",
       message: "Menunggu giliran worker.",
       launcherPath: null,
+      createdAt: new Date().toISOString(),
+      events: [],
     };
     accountCreationJobs.set(id, job);
     reservedAccountEmails.add(email);
     accountCreationQueue.push(job);
+    addAccountJobEvent(job, "requester", "Permintaan akun dibuat.");
     startAccountCreationWorker();
 
     return res.status(202).json({
@@ -95,8 +161,7 @@ app.post("/accounts/create", async (req, res) => {
       status: job.status,
       queuePosition:
         accountCreationQueue.length + (accountCreationWorkerRunning ? 1 : 0),
-      message:
-        "Permintaan masuk antrean. Chrome akan dibuka saat worker tersedia.",
+      message: "Permintaan masuk antrean. Admin server akan memfokuskan file saat siap.",
     });
   } catch (error) {
     console.error("[CREATE ACCOUNT]", error?.message);
@@ -104,6 +169,29 @@ app.post("/accounts/create", async (req, res) => {
       message: error?.message || "Gagal membuat profil email.",
     });
   }
+});
+
+app.get("/accounts/create", (req, res) => {
+  if (!API_KEY || req.headers["x-api-key"] !== API_KEY) {
+    return res.status(API_KEY ? 401 : 503).json({ message: "Unauthorized." });
+  }
+
+  const jobs = [...accountCreationJobs.values()].map((job) => {
+    const queueIndex = accountCreationQueue.indexOf(job);
+    return {
+      jobId: job.id,
+      account: job.email,
+      status: job.status,
+      message: job.message,
+      createdAt: job.createdAt,
+      queuePosition:
+        queueIndex >= 0
+          ? queueIndex + (accountCreationWorkerRunning ? 2 : 1)
+          : null,
+    };
+  });
+
+  return res.json(jobs);
 });
 
 app.get("/accounts/create/:jobId", (req, res) => {
@@ -118,12 +206,99 @@ app.get("/accounts/create/:jobId", (req, res) => {
     account: job.email,
     status: job.status,
     message: job.message,
+    createdAt: job.createdAt,
     queuePosition:
       queueIndex >= 0
         ? queueIndex + (accountCreationWorkerRunning ? 2 : 1)
         : null,
     launcherPath: job.launcherPath,
   });
+});
+
+app.post("/accounts/create/:jobId/complete", (req, res) => {
+  if (!API_KEY || req.headers["x-api-key"] !== API_KEY) {
+    return res.status(API_KEY ? 401 : 503).json({ message: "Unauthorized." });
+  }
+
+  const job = accountCreationJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ message: "Job tidak ditemukan." });
+  if (job.status !== "waiting_for_admin") {
+    return res.status(409).json({
+      message: "Job belum menunggu konfirmasi admin atau sudah selesai.",
+    });
+  }
+
+  addAccountJobEvent(job, "admin", "Admin mengonfirmasi proses login selesai.");
+  job.complete?.();
+  return res.json({ status: "completed", message: "Akun ditandai selesai." });
+});
+
+app.post("/accounts/create/:jobId/focus", async (req, res) => {
+  if (!API_KEY || req.headers["x-api-key"] !== API_KEY) {
+    return res.status(API_KEY ? 401 : 503).json({ message: "Unauthorized." });
+  }
+
+  const job = accountCreationJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ message: "Job tidak ditemukan." });
+  if (job.status !== "waiting_for_admin" || !job.launcherPath) {
+    return res.status(409).json({
+      message: "File launcher belum siap untuk difokuskan.",
+    });
+  }
+
+  try {
+    await revealLauncherInExplorer(job.launcherPath);
+    addAccountJobEvent(job, "admin", "Admin membuka file launcher di server.");
+    return res.json({
+      message: `File launcher ${job.email}.bat sudah difokuskan di komputer server.`,
+    });
+  } catch (error) {
+    console.error("[FOCUS ACCOUNT LAUNCHER]", error?.message);
+    return res.status(500).json({
+      message: error?.message || "Gagal memfokuskan file launcher di server.",
+    });
+  }
+});
+
+app.post("/accounts/:email/focus", async (req, res) => {
+  if (!API_KEY || req.headers["x-api-key"] !== API_KEY) {
+    return res.status(API_KEY ? 401 : 503).json({ message: "Unauthorized." });
+  }
+
+  const requestedEmail = req.params.email.trim().toLowerCase();
+  if (!isValidAccountEmail(requestedEmail)) {
+    return res.status(400).json({ message: "Alamat email tidak valid." });
+  }
+
+  const account = getAccounts().find(
+    (available) => available.toLowerCase() === requestedEmail,
+  );
+  if (!account) {
+    return res.status(404).json({ message: "Profil email tidak ditemukan." });
+  }
+
+  const launcherPath = path.resolve(ACCOUNT_LAUNCHER_DIR, `${account}.bat`);
+  let launcherExists = false;
+  try {
+    launcherExists = fs.statSync(launcherPath).isFile();
+  } catch {}
+  if (!launcherExists) {
+    return res.status(404).json({
+      message: `File launcher ${account}.bat tidak ditemukan di server.`,
+    });
+  }
+
+  try {
+    await revealLauncherInExplorer(launcherPath);
+    return res.json({
+      message: `File ${account}.bat sudah difokuskan di komputer server.`,
+    });
+  } catch (error) {
+    console.error("[FOCUS ACCOUNT LAUNCHER]", error?.message);
+    return res.status(500).json({
+      message: error?.message || "Gagal memfokuskan file launcher di server.",
+    });
+  }
 });
 
 app.delete("/accounts/:email", (req, res) => {
@@ -259,8 +434,79 @@ async function getOTP(page, provider) {
   }
 }
 
-// Account setup is deliberately a single worker: each job holds the worker
-// until its Chrome profile window is closed, so later requests stay queued.
+function revealLauncherInExplorer(launcherPath) {
+  if (process.platform !== "win32") {
+    throw new Error("Membuka file launcher dari server hanya tersedia di Windows.");
+  }
+
+  return new Promise((resolve, reject) => {
+    const explorer = spawn(
+      "explorer.exe",
+      ["/select,", launcherPath],
+      { detached: true, stdio: "ignore", windowsHide: false },
+    );
+    explorer.once("error", reject);
+    explorer.once("spawn", async () => {
+      explorer.unref();
+      await bringExplorerToFront(launcherPath).catch((error) => {
+        console.warn("[FOCUS EXPLORER] Gagal membawa jendela Explorer ke depan:", error.message);
+      });
+      resolve();
+    });
+  });
+}
+
+function bringExplorerToFront(launcherPath) {
+  const script = String.raw`
+$targetFolder = (Get-Item -LiteralPath $env:OTP_LAUNCHER_PATH).Directory.FullName
+$source = @"
+using System;
+using System.Runtime.InteropServices;
+public static class OtpWindowFocus {
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int command);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
+}
+"@
+Add-Type -TypeDefinition $source
+$shell = New-Object -ComObject Shell.Application
+$deadline = (Get-Date).AddSeconds(6)
+do {
+  foreach ($window in $shell.Windows()) {
+    try {
+      $windowPath = ([uri]$window.LocationURL).LocalPath
+      if ([IO.Path]::GetFullPath($windowPath) -ieq [IO.Path]::GetFullPath($targetFolder)) {
+        $handle = [IntPtr]$window.HWND
+        [void][OtpWindowFocus]::ShowWindow($handle, 9)
+        [void][OtpWindowFocus]::SetForegroundWindow($handle)
+        exit 0
+      }
+    } catch {}
+  }
+  Start-Sleep -Milliseconds 200
+} while ((Get-Date) -lt $deadline)
+exit 1
+`;
+
+  return new Promise((resolve, reject) => {
+    const focus = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
+      {
+        env: { ...process.env, OTP_LAUNCHER_PATH: launcherPath },
+        stdio: "ignore",
+        windowsHide: true,
+      },
+    );
+    focus.once("error", reject);
+    focus.once("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error("Jendela Explorer tidak berhasil dibawa ke depan."));
+    });
+  });
+}
+
+// One account setup at a time. Requests wait for the server admin to focus the
+// launcher, open Chrome manually, then confirm completion from the client.
 function startAccountCreationWorker() {
   if (accountCreationWorkerRunning) return;
   accountCreationWorkerRunning = true;
@@ -270,28 +516,44 @@ function startAccountCreationWorker() {
       while (accountCreationQueue.length) {
         const job = accountCreationQueue.shift();
         try {
-          job.status = "opening";
-          job.message = "Worker menyiapkan profile dan membuka Chrome.";
-          const profileDir = path.join(ACCOUNT_DATA_DIR, job.email);
-          fs.mkdirSync(profileDir);
-          job.launcherPath = writeAccountLauncher(job.email);
+          if (
+            job.status !== "waiting_for_admin" ||
+            !job.launcherPath ||
+            !fs.existsSync(job.launcherPath)
+          ) {
+            job.status = "opening";
+            job.message = "Server menyiapkan profil dan file launcher.";
+            persistAccountCreationJobs();
+            const profileDir = path.join(ACCOUNT_DATA_DIR, job.email);
+            if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir);
+            job.launcherPath = writeAccountLauncher(job.email);
+          }
 
           if (!fs.existsSync(CHROME_EXECUTABLE_PATH)) {
             throw new Error(`Chrome tidak ditemukan: ${CHROME_EXECUTABLE_PATH}`);
           }
 
-          await openGoogleSignIn(profileDir, (status) => {
-            job.status = status;
-            job.message =
-              status === "waiting_for_browser_close"
-                ? "Silakan selesaikan login atau pembuatan akun di Chrome. Worker lanjut setelah semua jendela profile ini ditutup."
-                : "Chrome sedang dibuka.";
+          job.status = "waiting_for_admin";
+          job.message =
+            "Profil siap. Menunggu admin server membuka launcher dan menyelesaikan login.";
+          persistAccountCreationJobs();
+          if (
+            !job.events.some(
+              (event) => event.message === "Profil siap menunggu admin server.",
+            )
+          ) {
+            addAccountJobEvent(job, "server", "Profil siap menunggu admin server.");
+          }
+          await new Promise((resolve) => {
+            job.complete = resolve;
           });
           job.status = "completed";
-          job.message = "Jendela Chrome ditutup. Profile siap digunakan dan worker selesai.";
+          job.message = "Login selesai dikonfirmasi admin.";
+          addAccountJobEvent(job, "server", "Request selesai; antrean dilanjutkan.");
         } catch (error) {
           job.status = "failed";
           job.message = error?.message || "Gagal membuka profile Chrome.";
+          addAccountJobEvent(job, "server", job.message);
           console.error(`[ACCOUNT WORKER] Job ${job.id} gagal:`, job.message);
         } finally {
           reservedAccountEmails.delete(job.email);
@@ -422,6 +684,7 @@ async function runJob(job, browser) {
 // START
 (async () => {
   processQueue();
+  if (accountCreationQueue.length) startAccountCreationWorker();
 
   app.listen(PORT, () => {
     console.log(`🚀 Server jalan di http://localhost:${PORT}`);

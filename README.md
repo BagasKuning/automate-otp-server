@@ -2,15 +2,31 @@
 
 Flow: client → API server → queue → Puppeteer → mail inbox → OTP response.
 
-## Add an account from the client
+## Request an account from the client
 
-In the client, click **Tambah akun email**, enter the email, then choose
-**Antrekan akun**. The server creates a Chrome profile folder and a matching
-`.bat` launcher when the job reaches the single account-creation worker, then
-opens the profile in Chrome without navigating to a URL. Navigate manually
-after Chrome opens; no form fields are filled automatically. The next request stays
-queued until every Chrome window for the current profile is closed. The client
-displays the queue and job status.
+Anyone using the client can open **Akun baru**, enter an email, and choose
+**Request akun**. Requests are processed one at a time. When a request is ready,
+the admin at the server computer clicks **Fokuskan file .bat di server**; this
+opens File Explorer on the server with the launcher selected. Run the `.bat`
+file, finish the login in Chrome, close all Chrome windows for that profile,
+then click **Login selesai, lanjutkan antrean**. The next queued request can
+then be prepared. Explorer appears on the computer running the server, so this
+step must be done by the server admin.
+
+The request queue is shared by all clients connected to the same server and is
+refreshed automatically in the client.
+Request status and the latest 30 system events per request are saved in
+`data/account-creation-jobs.json`, so the queue survives a server restart.
+The file also keeps a short event history for server-side troubleshooting. Use
+Discord for coordination between the requester and server admin.
+
+## Find an existing launcher
+
+Open the client's **Admin** tab, search for an existing email, then choose
+**Fokus file .bat**. The server selects the matching launcher directly in File
+Explorer, so there is no need to use Windows Search. The same tab lists new
+account requests for the admin to process. Explorer opens on the server
+computer.
 
 To remove a local profile, search for it in the email picker and click
 **Hapus**. After confirmation, the server removes the local Chrome profile
@@ -31,9 +47,9 @@ npm run account:add -- name@mail.com
 npm run accounts:generate
 ```
 
-The first command creates a profile and launcher, opens Chrome without a URL, and
-waits for all its Chrome windows to close. The
-second exports `data/accounts.json` and creates or updates launchers for the
+The first command creates a profile and launcher and opens File Explorer with
+the launcher selected. Run it manually to open Chrome. The second exports
+`data/accounts.json` and creates or updates launchers for the
 existing profiles. It does not delete old launchers or profiles.
 
 ## Chrome profile paths

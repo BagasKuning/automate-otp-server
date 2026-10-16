@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFile } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import "dotenv/config";
@@ -10,7 +11,6 @@ import {
   isValidAccountEmail,
 } from "./data/accounts.js";
 import { writeAccountLauncher } from "./account-tools.js";
-import { openGoogleSignIn } from "./google-signin.js";
 
 async function main() {
   let email = process.argv[2]?.trim();
@@ -49,8 +49,15 @@ async function main() {
     return;
   }
 
-  await openGoogleSignIn(profileDir);
-  console.log("Jendela Chrome ditutup; proses pembuatan akun selesai.");
+  await new Promise((resolve, reject) => {
+    execFile(
+      "explorer.exe",
+      [`/select,${launcherPath}`],
+      { windowsHide: false },
+      (error) => (error ? reject(error) : resolve()),
+    );
+  });
+  console.log("File launcher dipilih di File Explorer. Jalankan secara manual.");
   console.log("Akun akan tersedia di client setelah daftar di-sync.");
 }
 
