@@ -6,8 +6,6 @@ import { PROVIDERS, getProviderSubjects } from "./data/providers.js";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
 
 import puppeteer from "puppeteer-extra";
 import stealth from "puppeteer-extra-plugin-stealth";
@@ -35,44 +33,6 @@ const ACCOUNT_ASSET_AUDIT_INTERVAL_MS = 15 * 60 * 1000;
 const queue = [];
 let activeWorkers = 0;
 const runningAccounts = new Set();
-const accountCreationQueue = [];
-const accountCreationJobs = new Map();
-const reservedAccountEmails = new Set();
-let accountCreationWorkerRunning = false;
-const accountCreationJobsFile = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "data",
-  "account-creation-jobs.json",
-);
-
-function persistAccountCreationJobs() {
-  fs.mkdirSync(path.dirname(accountCreationJobsFile), { recursive: true });
-  fs.writeFileSync(
-    accountCreationJobsFile,
-    JSON.stringify(
-      [...accountCreationJobs.values()].map(
-        ({ id, email, status, message, launcherPath, createdAt, events }) => ({
-          id,
-          email,
-          status,
-          message,
-          launcherPath,
-          createdAt,
-          events,
-        }),
-      ),
-      null,
-      2,
-    ),
-  );
-}
-
-function addAccountJobEvent(job, by, message) {
-  job.events ??= [];
-  job.events.push({ at: new Date().toISOString(), by, message });
-  job.events = job.events.slice(-30);
-  persistAccountCreationJobs();
-}
 
 function auditAccountFiles() {
   try {
@@ -92,66 +52,11 @@ function auditAccountFiles() {
       }
     }
 
-    let failedRequests = 0;
-    for (const job of accountCreationJobs.values()) {
-      if (job.status !== "waiting_for_admin") continue;
-
-      const profilePath = path.join(ACCOUNT_DATA_DIR, job.email);
-      const launcherPath = path.join(ACCOUNT_LAUNCHER_DIR, `${job.email}.bat`);
-      let profileExists = false;
-      let launcherExists = false;
-      try {
-        profileExists = fs.statSync(profilePath).isDirectory();
-      } catch {}
-      try {
-        launcherExists = fs.statSync(launcherPath).isFile();
-      } catch {}
-
-      if (profileExists && launcherExists) continue;
-
-      job.status = "failed";
-      job.message =
-        "Folder profil atau file launcher hilang saat menunggu admin. Silakan buat request akun lagi.";
-      addAccountJobEvent(job, "server", job.message);
-      job.complete?.();
-      failedRequests += 1;
-    }
-
     console.log(
-      `[ACCOUNT AUDIT] Selesai: ${accounts.length} profil diperiksa, ${restoredLaunchers} launcher dipulihkan, ${failedRequests} request aktif gagal karena file hilang.`,
+      `[ACCOUNT AUDIT] Selesai: ${accounts.length} profil diperiksa, ${restoredLaunchers} launcher dipulihkan.`,
     );
   } catch (error) {
     console.error("[ACCOUNT AUDIT] Gagal memeriksa file akun:", error.message);
-  }
-}
-
-try {
-  const savedJobs = JSON.parse(
-    fs.readFileSync(accountCreationJobsFile, "utf8"),
-  );
-  if (Array.isArray(savedJobs)) {
-    for (const saved of savedJobs) {
-      if (!saved?.id || !isValidAccountEmail(saved.email)) continue;
-      const job = {
-        ...saved,
-        complete: undefined,
-        events: Array.isArray(saved.events) ? saved.events : [],
-      };
-      if (["queued", "opening"].includes(job.status)) {
-        job.status = "queued";
-        job.message = "Request dipulihkan setelah server dijalankan ulang.";
-        accountCreationQueue.push(job);
-        reservedAccountEmails.add(job.email);
-      } else if (job.status === "waiting_for_admin") {
-        accountCreationQueue.push(job);
-        reservedAccountEmails.add(job.email);
-      }
-      accountCreationJobs.set(job.id, job);
-    }
-  }
-} catch (error) {
-  if (error.code !== "ENOENT") {
-    console.error("[ACCOUNT JOBS] Gagal membaca file antrean:", error.message);
   }
 }
 
@@ -167,6 +72,30 @@ app.get("/", (req, res) => {
     message: "OTP Server Ready.",
   });
 });
+
+function prepareAccountLauncher(requestedEmail) {
+  fs.mkdirSync(ACCOUNT_DATA_DIR, { recursive: true });
+
+  const account =
+    getAccounts().find(
+      (available) => available.toLowerCase() === requestedEmail.toLowerCase(),
+    ) || requestedEmail;
+  const profileDir = path.join(ACCOUNT_DATA_DIR, account);
+  fs.mkdirSync(profileDir, { recursive: true });
+
+  const launcherPath = path.join(ACCOUNT_LAUNCHER_DIR, `${account}.bat`);
+  let launcherExists = false;
+  try {
+    launcherExists = fs.statSync(launcherPath).isFile();
+  } catch {}
+
+  return {
+    account,
+    launcherPath: launcherExists
+      ? launcherPath
+      : writeAccountLauncher(account),
+  };
+}
 
 app.post("/accounts/create", async (req, res) => {
   if (!API_KEY) {
@@ -191,36 +120,15 @@ app.post("/accounts/create", async (req, res) => {
   }
 
   try {
-    fs.mkdirSync(ACCOUNT_DATA_DIR, { recursive: true });
-    if (reservedAccountEmails.has(email)) {
-      return res.status(409).json({
-        message: `Request untuk ${email} sudah ada di antrean.`,
-      });
+    if (!fs.existsSync(CHROME_EXECUTABLE_PATH)) {
+      throw new Error(`Chrome tidak ditemukan: ${CHROME_EXECUTABLE_PATH}`);
     }
-
-    const id = randomUUID();
-    const job = {
-      id,
-      email,
-      status: "queued",
-      message: "Menunggu giliran worker.",
-      launcherPath: null,
-      createdAt: new Date().toISOString(),
-      events: [],
-    };
-    accountCreationJobs.set(id, job);
-    reservedAccountEmails.add(email);
-    accountCreationQueue.push(job);
-    addAccountJobEvent(job, "requester", "Permintaan akun dibuat.");
-    startAccountCreationWorker();
-
-    return res.status(202).json({
-      jobId: id,
-      status: job.status,
-      queuePosition:
-        accountCreationQueue.length + (accountCreationWorkerRunning ? 1 : 0),
-      message:
-        "Request masuk antrean. Launcher akan otomatis dibuka di komputer server saat gilirannya tiba.",
+    const { account, launcherPath } = prepareAccountLauncher(email);
+    await launchAccountBatchFile(launcherPath);
+    return res.json({
+      account,
+      status: "opened",
+      message: `Chrome untuk ${account} sudah dibuka di komputer server. Silakan lanjutkan login secara manual.`,
     });
   } catch (error) {
     console.error("[CREATE ACCOUNT]", error?.message);
@@ -228,68 +136,6 @@ app.post("/accounts/create", async (req, res) => {
       message: error?.message || "Gagal membuat profil email.",
     });
   }
-});
-
-app.get("/accounts/create", (req, res) => {
-  if (!API_KEY || req.headers["x-api-key"] !== API_KEY) {
-    return res.status(API_KEY ? 401 : 503).json({ message: "Unauthorized." });
-  }
-
-  const jobs = [...accountCreationJobs.values()].map((job) => {
-    const queueIndex = accountCreationQueue.indexOf(job);
-    return {
-      jobId: job.id,
-      account: job.email,
-      status: job.status,
-      message: job.message,
-      createdAt: job.createdAt,
-      queuePosition:
-        queueIndex >= 0
-          ? queueIndex + (accountCreationWorkerRunning ? 2 : 1)
-          : null,
-    };
-  });
-
-  return res.json(jobs);
-});
-
-app.get("/accounts/create/:jobId", (req, res) => {
-  if (!API_KEY || req.headers["x-api-key"] !== API_KEY) {
-    return res.status(API_KEY ? 401 : 503).json({ message: "Unauthorized." });
-  }
-  const job = accountCreationJobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ message: "Job tidak ditemukan." });
-  const queueIndex = accountCreationQueue.indexOf(job);
-  return res.json({
-    jobId: job.id,
-    account: job.email,
-    status: job.status,
-    message: job.message,
-    createdAt: job.createdAt,
-    queuePosition:
-      queueIndex >= 0
-        ? queueIndex + (accountCreationWorkerRunning ? 2 : 1)
-        : null,
-    launcherPath: job.launcherPath,
-  });
-});
-
-app.post("/accounts/create/:jobId/complete", (req, res) => {
-  if (!API_KEY || req.headers["x-api-key"] !== API_KEY) {
-    return res.status(API_KEY ? 401 : 503).json({ message: "Unauthorized." });
-  }
-
-  const job = accountCreationJobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ message: "Job tidak ditemukan." });
-  if (job.status !== "waiting_for_admin") {
-    return res.status(409).json({
-      message: "Job belum menunggu konfirmasi admin atau sudah selesai.",
-    });
-  }
-
-  addAccountJobEvent(job, "admin", "Admin mengonfirmasi proses login selesai.");
-  job.complete?.();
-  return res.json({ status: "completed", message: "Akun ditandai selesai." });
 });
 
 app.delete("/accounts/:email", (req, res) => {
@@ -313,39 +159,12 @@ app.delete("/accounts/:email", (req, res) => {
   const hasPendingOtp = queue.some(
     (job) => job.account.trim().toLowerCase() === accountKey,
   );
-  const activeAccountCreationJob = [...accountCreationJobs.values()].find(
-    (job) =>
-      job.email.toLowerCase() === accountKey &&
-      ["opening", "waiting_for_admin"].includes(job.status),
-  );
-  if (activeAccountCreationJob) {
-    return res.status(409).json({
-      message:
-        activeAccountCreationJob.status === "waiting_for_admin"
-          ? "Chrome untuk email ini masih menunggu admin. Tutup Chrome dan tandai request selesai sebelum menghapus profil."
-          : "Worker sedang menyiapkan email ini. Coba hapus lagi setelah proses selesai.",
-    });
-  }
   if (runningAccounts.has(accountKey) || hasPendingOtp) {
     return res.status(409).json({
       message:
         "Email sedang dipakai atau masih dalam antrean OTP. Coba hapus lagi setelah proses selesai.",
     });
   }
-
-  const queuedAccountJobs = accountCreationJobs.values();
-  for (const job of queuedAccountJobs) {
-    if (job.email.toLowerCase() !== accountKey || job.status !== "queued") {
-      continue;
-    }
-    const queuedIndex = accountCreationQueue.indexOf(job);
-    if (queuedIndex >= 0) accountCreationQueue.splice(queuedIndex, 1);
-    job.status = "cancelled";
-    job.message = "Request dibatalkan karena profil email dihapus admin.";
-    addAccountJobEvent(job, "admin", job.message);
-    job.complete?.();
-  }
-  reservedAccountEmails.delete(accountKey);
 
   try {
     const profileDir = path.resolve(ACCOUNT_DATA_DIR, account);
@@ -359,7 +178,6 @@ app.delete("/accounts/:email", (req, res) => {
 
     fs.rmSync(profileDir, { recursive: true });
     fs.rmSync(launcherPath, { force: true });
-    persistAccountCreationJobs();
     return res.json({
       account,
       message: `Profil ${account} dan launcher-nya berhasil dihapus.`,
@@ -477,93 +295,6 @@ function launchAccountBatchFile(launcherPath) {
       resolve();
     });
   });
-}
-
-// Process one account setup at a time. Reuse existing profiles and launchers
-// when available, then automatically run the launcher for the server admin.
-function startAccountCreationWorker() {
-  if (accountCreationWorkerRunning) return;
-  accountCreationWorkerRunning = true;
-
-  void (async () => {
-    try {
-      while (accountCreationQueue.length) {
-        const job = accountCreationQueue.shift();
-        try {
-          job.status = "opening";
-          job.message = "Server menyiapkan profil dan file launcher.";
-          persistAccountCreationJobs();
-
-          const existingAccount = getAccounts().find(
-            (account) => account.toLowerCase() === job.email.toLowerCase(),
-          );
-          const accountFolder = existingAccount || job.email;
-          const profileDir = path.join(ACCOUNT_DATA_DIR, accountFolder);
-          fs.mkdirSync(profileDir, { recursive: true });
-
-          const launcherPath = path.join(
-            ACCOUNT_LAUNCHER_DIR,
-            `${accountFolder}.bat`,
-          );
-          let launcherExists = false;
-          try {
-            launcherExists = fs.statSync(launcherPath).isFile();
-          } catch {}
-          job.launcherPath = launcherExists
-            ? launcherPath
-            : writeAccountLauncher(accountFolder);
-
-          if (!fs.existsSync(CHROME_EXECUTABLE_PATH)) {
-            throw new Error(
-              `Chrome tidak ditemukan: ${CHROME_EXECUTABLE_PATH}`,
-            );
-          }
-
-          await launchAccountBatchFile(job.launcherPath);
-
-          job.status = "waiting_for_admin";
-          job.message =
-            "File .bat sudah dijalankan di komputer server dan Chrome dibuka. Admin selesaikan login manual, tutup Chrome, lalu konfirmasi request.";
-          persistAccountCreationJobs();
-          if (
-            !job.events.some(
-              (event) =>
-                event.message ===
-                "Launcher .bat dijalankan otomatis; menunggu admin menyelesaikan login.",
-            )
-          ) {
-            addAccountJobEvent(
-              job,
-              "server",
-              "Launcher .bat dijalankan otomatis; menunggu admin menyelesaikan login.",
-            );
-          }
-          await new Promise((resolve) => {
-            job.complete = resolve;
-          });
-          if (job.status !== "failed") {
-            job.status = "completed";
-            job.message = "Login selesai dikonfirmasi admin.";
-            addAccountJobEvent(
-              job,
-              "server",
-              "Request selesai; antrean dilanjutkan.",
-            );
-          }
-        } catch (error) {
-          job.status = "failed";
-          job.message = error?.message || "Gagal membuka profile Chrome.";
-          addAccountJobEvent(job, "server", job.message);
-          console.error(`[ACCOUNT WORKER] Job ${job.id} gagal:`, job.message);
-        } finally {
-          reservedAccountEmails.delete(job.email);
-        }
-      }
-    } finally {
-      accountCreationWorkerRunning = false;
-      if (accountCreationQueue.length) startAccountCreationWorker();
-    }
-  })();
 }
 
 // QUEUE PROCESSOR
@@ -684,7 +415,6 @@ async function runJob(job, browser) {
 // START
 (async () => {
   processQueue();
-  if (accountCreationQueue.length) startAccountCreationWorker();
   const accountAuditTimer = setInterval(
     auditAccountFiles,
     ACCOUNT_ASSET_AUDIT_INTERVAL_MS,
