@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import "dotenv/config";
@@ -50,14 +50,18 @@ async function main() {
   }
 
   await new Promise((resolve, reject) => {
-    execFile(
-      "explorer.exe",
-      [`/select,${launcherPath}`],
-      { windowsHide: false },
-      (error) => (error ? reject(error) : resolve()),
+    const launcher = spawn(
+      "cmd.exe",
+      ["/d", "/c", "call", launcherPath],
+      { detached: true, stdio: "ignore", windowsHide: true },
     );
+    launcher.once("error", reject);
+    launcher.once("spawn", () => {
+      launcher.unref();
+      resolve();
+    });
   });
-  console.log("File launcher dipilih di File Explorer. Jalankan secara manual.");
+  console.log("Launcher dijalankan. Selesaikan login secara manual di Chrome.");
   console.log("Akun akan tersedia di client setelah daftar di-sync.");
 }
 

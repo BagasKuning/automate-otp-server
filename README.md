@@ -5,13 +5,12 @@ Flow: client → API server → queue → Puppeteer → mail inbox → OTP respo
 ## Request an account from the client
 
 Anyone using the client can open **Akun baru**, enter an email, and choose
-**Request akun**. Requests are processed one at a time. When a request is ready,
-the admin at the server computer clicks **Fokuskan file .bat di server**; this
-opens File Explorer on the server with the launcher selected. Run the `.bat`
-file, finish the login in Chrome, close all Chrome windows for that profile,
-then click **Login selesai, lanjutkan antrean**. The next queued request can
-then be prepared. Explorer appears on the computer running the server, so this
-step must be done by the server admin.
+**Request akun**. Requests are processed one at a time. When a request reaches
+the front of the queue, the server reuses its profile folder and `.bat` launcher
+if present, creates whichever is missing, then runs the launcher automatically.
+Chrome opens on the server computer. The admin completes the login manually,
+closes all Chrome windows for that profile, then clicks
+**Login selesai, lanjutkan antrean**. This step must be done by the server admin.
 
 The request queue is shared by all clients connected to the same server and is
 refreshed automatically in the client.
@@ -25,19 +24,20 @@ profile folder exists but its `.bat` launcher is missing, the server recreates
 the launcher. An active request is marked failed and released from the queue if
 its profile folder or launcher disappears while waiting for the admin.
 
-## Find an existing launcher
+## Manage existing profiles
 
-Open the client's **Admin** tab, search for an existing email, then choose
-**Fokus file .bat**. The server selects the matching launcher directly in File
-Explorer, so there is no need to use Windows Search. The same tab lists new
-account requests for the admin to process. Explorer opens on the server
-computer.
+Open the client's **Admin** tab to search existing profiles and process new
+account requests. The admin can delete profiles from the profile list. New
+account requests launch their `.bat` file automatically when they reach the
+front of the queue.
 
 To remove a local profile, search for it in the email picker and click
 **Hapus**. After confirmation, the server removes the local Chrome profile
 folder and its `.bat` launcher; this does not delete the Google account itself.
-Profiles currently used by a server job or queued for an OTP request cannot be
-deleted. Close any Chrome windows opened manually for that profile first.
+Account setup requests still waiting in the queue are marked cancelled and
+removed from the worker queue. A profile cannot be deleted while its Chrome
+setup is active or an OTP request is running or queued. Close Chrome and finish
+the active setup first.
 
 The server must run in the signed-in Windows desktop session for the Chrome
 window to be visible to the admin. The create-profile endpoint requires the
@@ -52,8 +52,8 @@ npm run account:add -- name@mail.com
 npm run accounts:generate
 ```
 
-The first command creates a profile and launcher and opens File Explorer with
-the launcher selected. Run it manually to open Chrome. The second exports
+The first command creates a profile and launcher, then runs the launcher to
+open Chrome. Complete the login manually. The second exports
 `data/accounts.json` and creates or updates launchers for the
 existing profiles. It does not delete old launchers or profiles.
 

@@ -1,10 +1,16 @@
-import puppeteer from "puppeteer";
+import puppeteer from "puppeteer-extra";
+import stealth from "puppeteer-extra-plugin-stealth";
+
+puppeteer.use(stealth());
+
 import { CHROME_EXECUTABLE_PATH } from "./data/accounts.js";
 
 /** Open a new Chrome profile without navigating it, then hold the account
  * creation worker until the Chrome window is closed. */
 export async function openGoogleSignIn(profileDir, onState = () => {}) {
-  console.log("[ACCOUNT WORKER] Menjalankan Chrome tanpa membuka URL tertentu.");
+  console.log(
+    "[ACCOUNT WORKER] Menjalankan Chrome tanpa membuka URL tertentu.",
+  );
   const browser = await puppeteer.launch({
     headless: false,
     executablePath: CHROME_EXECUTABLE_PATH,
@@ -17,9 +23,13 @@ export async function openGoogleSignIn(profileDir, onState = () => {}) {
   if (pages.length === 0) await browser.newPage();
 
   onState("waiting_for_browser_close");
-  console.log("[ACCOUNT WORKER] Chrome terbuka. Menunggu semua jendela profile ini ditutup.");
+  console.log(
+    "[ACCOUNT WORKER] Chrome terbuka. Menunggu semua jendela profile ini ditutup.",
+  );
   await waitUntilBrowserClosed(browser);
-  console.log("[ACCOUNT WORKER] Chrome ditutup; worker siap memproses antrean berikutnya.");
+  console.log(
+    "[ACCOUNT WORKER] Chrome ditutup; worker siap memproses antrean berikutnya.",
+  );
 }
 
 function waitUntilBrowserClosed(browser) {
